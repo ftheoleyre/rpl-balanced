@@ -1,0 +1,975 @@
+/*
+ *  stats.c
+ *  
+ *
+ *  Created by Fabrice Theoleyre on 04/10/11.
+ *  Copyright 2011 CNRS. All rights reserved.
+ *
+ */
+
+#include "stats.h"
+
+
+
+//----------------------------------------------
+//				STATS 
+//----------------------------------------------
+
+
+//the list to save stats about CBR packets (global list)
+stat_cbr_info *global_cbr_stats = NULL;
+
+//cluster-tree stats
+stat_ctree_info *global_ctree_stats = NULL;
+
+//informations on all nodes (god infos)
+nodedata_info	**god_knowledge = NULL;
+
+//nb packets received and transmitted (3 bits for the frame type)
+int _stats_pk_rx_nb[8];
+int _stats_pk_tx_nb[8];
+
+
+
+
+//----------------------------------------------
+//				STATS - CONNECTIVITY
+//----------------------------------------------
+
+
+void stats_print_connectivity(call_t *c){
+    
+    fprintf(stdout, "--------- GRAPH ------------\n");
+    fprintf(stdout, "Nb edge removal before disconnection         :%f\n",	routing_get_connectivity_metric_link_removal(c));
+    fprintf(stdout, "Nb node removal before disconnection         :%f\n",	routing_get_connectivity_metric_node_removal(c));
+}
+
+
+//----------------------------------------------
+//				STATS - PACKETS
+//----------------------------------------------
+
+uint16_t multicast_last_destination = 0;
+
+
+//initialization
+void stats_init(){
+	
+}
+
+//updates the stats
+void stats_pk_rx(packet_t *packet){
+	_stats_pk_rx_nb[pk_get_ftype(packet)]++;
+}
+void stats_pk_tx(packet_t *packet){
+	_stats_pk_tx_nb[pk_get_ftype(packet)]++;
+}
+
+//get the stats
+int stats_get_pk_rx(int type){
+	return(_stats_pk_rx_nb[type]);
+}
+int stats_get_pk_tx(int type){
+	return(_stats_pk_tx_nb[type]);
+}
+
+
+
+//--------------------------------------------
+//      STATS  for  UNICAST / MULTICAST
+//--------------------------------------------
+
+//this packet was dropped because of too many CCA -> update the stats
+void stats_data_update_drop_reason(call_t *c, packet_t *packet, short reason){
+	//control
+	stat_cbr_info	*stat_elem;
+	
+	//particular case (the pending packet can be sometimes null)
+	if (packet == NULL)
+		return;
+	
+	//this is actually a data packet
+	if (pk_get_ftype(packet) == MAC_DATA_PACKET){
+		cbrv3_packet_header		*header_cbr		= (cbrv3_packet_header *) (packet->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+		
+		
+		//searches for the corresponding seqnum
+		das_init_traverse(global_cbr_stats);
+		stat_elem = NULL;
+		while ((stat_elem = (stat_cbr_info*) das_traverse(global_cbr_stats)) != NULL){
+			if (stat_elem->sequence == header_cbr->sequence){
+				tools_debug_print(c, "[DATA] cbrseq=%d is dropped because reason %d\n", stat_elem->sequence, reason); 
+				
+				stat_elem->drop_reason = reason;
+				return;
+			}			
+		}
+		
+		//not found -> BUG
+		tools_exit(3, c, "[ERROR] the seqnum %d was not found in the stats\n", stat_elem->sequence);
+        
+	}
+	
+}
+
+//statistics when I transmit a multicast frame
+void stats_multicast_add_pk(call_t *c, packet_t *packet_rcvd){
+ 	nodedata_info *nodedata = get_node_private_data(c);
+    stat_cbr_info           *stat_elem;
+ 	cbrv3_packet_header		*header_cbr		= (cbrv3_packet_header *) (packet_rcvd->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+    
+    //control
+    int     i;
+    char    msg[310];
+    int     nb_nodes = get_node_count();
+    
+    
+    //RADIO LINKS
+    for(i=0; i<nb_nodes; i++)
+        if ((c->node != i) && (distance(get_node_position(c->node), get_node_position(i)) < RADIO_RANGE)){
+            stats_list_add(c, packet_rcvd, LIST_NEIGH_RADIO, i, FALSE);
+            //tools_debug_print(c, "[MULTICAST] radio link %d-%d dist %f, seqnum=%lu\n", c->node, i, distance(get_node_position(c->node), get_node_position(i)), header_cbr->sequence);
+        }
+    
+    //CTREE LINKS
+    //Be careful: since the radio range is an estimation, we insert ctree neighbors in the list of radio neighbors!)
+    for(i=0; i<ctree_parent_get_nb_associated(nodedata->parents); i++){
+        stats_list_add(c, packet_rcvd, LIST_NEIGH_CTREE, ctree_parent_get_associated(nodedata->parents, i), FALSE);        
+        stats_list_add(c, packet_rcvd, LIST_NEIGH_RADIO, ctree_parent_get_associated(nodedata->parents, i), FALSE); 
+        
+        //tools_debug_print(c, "[MULTICAST] insertion of parent %d, cbrseq=%lu\n", ctree_parent_get_associated(nodedata->parents, i), header_cbr->sequence);
+    }
+    for(i=0; i<neigh_table_get_nb_children(nodedata->neigh_table); i++){
+        stats_list_add(c, packet_rcvd, LIST_NEIGH_CTREE, neigh_table_get_child(nodedata->neigh_table, i), FALSE);
+        stats_list_add(c, packet_rcvd, LIST_NEIGH_RADIO, neigh_table_get_child(nodedata->neigh_table, i), FALSE);
+        
+        //tools_debug_print(c, "[MULTICAST] insertion of child %d, cbrseq=%lu\n", neigh_table_get_child(nodedata->neigh_table, i), header_cbr->sequence);
+    }
+    
+    
+    //no debug -> exit now
+    if (!param_debug())
+        return;
+
+    
+    //DEBUG
+    das_init_traverse(global_cbr_stats);
+    stat_elem = NULL;
+    while ((stat_elem = (stat_cbr_info*) das_traverse(global_cbr_stats)) != NULL){
+        
+        //insert this node in the list
+        if (stat_elem->sequence == header_cbr->sequence){
+            //tools_debug_print(c, "[STATS] ptr print : %ld, das %ld\n", (long int)stat_elem, (long int)stat_elem->neigh_ctree);
+
+            tools_debug_print(c, "[MULTICAST] radio neighbors: |%s|\n", stats_list_to_str(stat_elem->neigh_radio, msg, 300));
+            tools_debug_print(c, "[MULTICAST] ctree neighbors: |%s|\n", stats_list_to_str(stat_elem->neigh_ctree, msg, 300));
+        }
+    }    
+    
+    //save the last multicast destination we generated
+  	_802_15_4_DATA_header	*header_data	= (_802_15_4_DATA_header *) (packet_rcvd->data + sizeof(_802_15_4_header));
+    if ((header_data->dst_end2end >= ADDR_MULTI_FLOOD_CTREE) && (header_data->dst_end2end <= ADDR_MULTI_DISC))
+        multicast_last_destination = header_data->dst_end2end;
+
+}
+
+
+
+
+//----------------------------------------------
+//				STATS - DATA
+//----------------------------------------------
+
+//returns TRUE if id is already present in the list
+short stats_neigh_is_id_present(uint16_t *plist, uint16_t id){
+	forward_info    *forward_elem;
+    
+    das_init_traverse(plist);
+	while ((forward_elem = (forward_info*) das_traverse(plist)) != NULL){
+        if (forward_elem->nodeid == id)
+            return(TRUE);
+    }
+    return(FALSE);
+}
+
+//converion of the list type into a string
+char *stats_list_type_to_str(int type){
+   
+    switch(type){
+        case LIST_NEIGH_RCVD:
+            return("LIST_NEIGH_RCVD");
+            break;
+        case LIST_NEIGH_RADIO:
+            return("LIST_NEIGH_RADIO");
+            break;
+        case LIST_NEIGH_CTREE:
+            return("LIST_NEIGH_CTREE");
+            break;
+        case LIST_ROUTE:
+            return("LIST_ROUTE");
+            break;
+    }
+    return("BAD_LIST");
+}
+
+
+//adds myself in the list
+void stats_list_add(call_t *c, packet_t *packet_rcvd, short list_type, nodeid_t id, short debug){
+  	stat_cbr_info	*stat_elem;
+    
+    //packet info
+   	cbrv3_packet_header		*header_cbr		= (cbrv3_packet_header *) (packet_rcvd->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+    uint16_t        dest = pk_get_dst_short(packet_rcvd);
+    long int        cbrseq = header_cbr->sequence;
+ 
+	das_init_traverse(global_cbr_stats);
+	stat_elem = NULL;
+	while ((stat_elem = (stat_cbr_info*) das_traverse(global_cbr_stats)) != NULL){
+		
+		//insert this node in the list
+		if (stat_elem->sequence == cbrseq){
+			
+            uint16_t    *plist;
+            switch(list_type){
+                case LIST_NEIGH_RCVD:
+                    plist = stat_elem->neigh_rcvd;
+                    break;
+                case LIST_NEIGH_RADIO:
+                    plist = stat_elem->neigh_radio;
+                    break;
+                case LIST_NEIGH_CTREE:
+                    plist = stat_elem->neigh_ctree;
+                    break;
+                case LIST_ROUTE:
+                    plist = stat_elem->route;                
+                    break;
+                default:
+                    tools_exit(4,c,"[stats_list_add] bad list type\n");
+                    exit(4);
+            }
+            
+           
+            //This was a radio neighbor when the packet was generated
+            short to_add = FALSE;                               
+            if (dest == ADDR_MULTI_DISC)
+               to_add = !stats_neigh_is_id_present(plist, id) && stats_neigh_is_id_present(stat_elem->neigh_radio, id) ;
+                  
+            //This was a CTREE neighbor when the pk was created
+            else if (dest == ADDR_MULTI_CTREE)
+                to_add = !stats_neigh_is_id_present(plist, id) && stats_neigh_is_id_present(stat_elem->neigh_ctree, id) ;    
+            
+            //Flooding            
+            else if ((dest == ADDR_MULTI_FLOOD_DISC) || (dest == ADDR_MULTI_FLOOD_CTREE))
+                to_add = !stats_neigh_is_id_present(plist, id);
+                
+            //unicast
+            else if (dest < ADDR_MULTI_MIN)
+                    
+                to_add = !stats_neigh_is_id_present(plist, id);
+
+            //BUG
+            else
+                tools_exit(5, c, "[DATA] the destination %d is uknown for stats\n", dest);
+
+            //insertion only if it does not yet exist in the list (duplicated receptions may exist even if this is very rare)
+            if (to_add){
+                forward_info    *forward_elem = malloc(sizeof(forward_info));
+                forward_elem->nodeid    = id;
+                forward_elem->time      = get_time(); 
+                das_insert(plist, (void*)forward_elem);                
+                if (debug)
+                    tools_debug_print(c, "[STATS] insertion of node %d in the list %s, cbrseq=%lu\n", id, stats_list_type_to_str(list_type), cbrseq);
+			}
+			return;
+		}
+	}
+	tools_exit(2, c, "UNKWNON STAT CBRSEQ %d\n", cbrseq);  
+    
+}
+
+//print the stats associated to data forwarding
+void stats_print_data_unicast(call_t *c){
+	//params
+	int			nb_nodes = get_node_count();
+	
+	//PDR
+	//	int			nb_pk_sent = 0;
+	//	int			nb_pk_rcvd = 0;	
+	//	uint64_t	delay = 0;
+	double		jain_index = 0;
+	//	int			route_length_cumul = 0;
+	//UPLOAD
+	int			nb_pk_sent_up = 0;
+	int			nb_pk_rcvd_up = 0;	
+	uint64_t	delay_up = 0;
+	//	double		jain_index_up = 0;
+	int			route_length_cumul_up = 0;
+	//DOWNLOAD
+	int			nb_pk_sent_down = 0;
+	int			nb_pk_rcvd_down = 0;	
+	uint64_t	delay_down = 0;
+	//	double		jain_index_down = 0;
+	int			route_length_cumul_down = 0;
+	
+	//reasons for the drops
+	int			nb_drop_cca = 0;
+	int			nb_drop_retx = 0;
+	int			nb_drop_assoc = 0;
+	int			nb_drop_buf_timeout = 0;
+	int			nb_drop_up = 0;				//any dropped packet in the upload direction
+	
+	//stats per flow
+	int			*flow_nb_pk_sent	= (int*)calloc(nb_nodes, sizeof(int));
+	int			*flow_nb_pk_rcvd	= (int*)calloc(nb_nodes, sizeof(int));
+	uint64_t	*flow_delay			= (uint64_t*)calloc(nb_nodes, sizeof(uint64_t));
+	
+	//control
+	stat_cbr_info	*stat_elem;
+	int				i;
+   
+    //debug
+    if (param_debug() && 1)
+        fprintf(stdout, "SRC		DEST	SEQ		TIME_GEN	TIME_RCVD	DROP_REASON	ROUTE\n");
+	
+        //walk in the stats
+	das_init_traverse(global_cbr_stats);
+	stat_elem = NULL;
+	while ((stat_elem = (stat_cbr_info*) das_traverse(global_cbr_stats)) != NULL){
+		
+		
+        //unicast packets
+		if ((stat_elem->time_generated < get_time() - STATS_STOP_BEFORE_END) && (!tools_is_addr_multicast(stat_elem->dest))){
+		
+            //DEBUG
+            if (param_debug() && 1){
+                fprintf(stdout, "%d		%d		%d		%f	%f	%7s	", \
+                        stat_elem->src, \
+                        stat_elem->dest, \
+                        stat_elem->sequence, \
+                        (double)stat_elem->time_generated / 1e9, \
+                        (double)stat_elem->time_received / 1e9,\
+                        tools_drop_reason_to_str(stat_elem->drop_reason));
+                
+                //print the route
+                nodeid_t *id_ptr;
+                das_init_traverse(stat_elem->route);
+                while ((id_ptr = (nodeid_t*) das_traverse(stat_elem->route)) != NULL){
+                    fprintf(stdout, "%d|", *id_ptr);
+                }
+                fprintf(stdout, "\n");
+            }
+            
+            if (stat_elem->dest != ID_PAN_COORD)
+				nb_pk_sent_down ++;
+			else
+				nb_pk_sent_up ++;
+			flow_nb_pk_sent[stat_elem->src] ++;
+			
+			
+			//the packet was received
+			if (stat_elem->time_received != 0){
+				if (stat_elem->dest != ID_PAN_COORD){
+					nb_pk_rcvd_down++;
+					delay_down += stat_elem->time_received - stat_elem->time_generated;
+					route_length_cumul_down += das_getsize(stat_elem->route) - 1;
+				}	
+				else{
+					nb_pk_rcvd_up++;
+					delay_up += stat_elem->time_received - stat_elem->time_generated;
+					route_length_cumul_up += das_getsize(stat_elem->route) - 1;
+				}
+				flow_nb_pk_rcvd[stat_elem->src] ++;
+				flow_delay[stat_elem->src] += stat_elem->time_received - stat_elem->time_generated;
+				
+			}
+			//the packet was dropped
+			else if (stat_elem->dest == ID_PAN_COORD){
+				
+				nb_drop_up++;
+				
+				switch(stat_elem->drop_reason){
+					case DROP_CCA:
+						nb_drop_cca++;
+						break;
+					case DROP_RETX:
+						nb_drop_retx++;
+						break;
+					case DROP_NOT_ASSOCIATED:
+						nb_drop_assoc++;
+						break;	
+					case DROP_BUFFER_TIMEOUT:
+						nb_drop_buf_timeout++;
+						break;
+					default:
+						//if (param_debug())
+						//	printf("unknown reason for %d\n", stat_elem->sequence);
+						break;
+				}
+			}
+		}
+	}
+	
+    //Jain index
+    double	cumul_numerator = 0;
+    double	cumul_denominator = 0;
+    int		count =0;
+    for(i=0; i<nb_nodes; i++)
+        if (flow_nb_pk_sent[i] > 0){
+            count++;
+            cumul_denominator	+= pow((double) flow_nb_pk_rcvd[i] / flow_nb_pk_sent[i] , 2); 
+            cumul_numerator		+= (double) flow_nb_pk_rcvd[i] / flow_nb_pk_sent[i];
+        }
+    jain_index = pow(cumul_numerator, 2) / (count * cumul_denominator); 
+    
+    
+    fprintf(stdout, "--------- OVERHEAD ------------\n");
+    int type, nb_pk_rx=0, nb_pk_tx=0;
+    for(type=0; type<8; type++)
+        if (stats_get_pk_tx(type) > 0){
+            fprintf(stdout, "%6s - Nb transmitted packets              :%d\n",	pk_ftype_to_str(type), stats_get_pk_tx(type));
+            fprintf(stdout, "%6s - Nb received packets                 :%d\n",	pk_ftype_to_str(type), stats_get_pk_rx(type));
+            nb_pk_rx += stats_get_pk_rx(type);
+            nb_pk_tx += stats_get_pk_tx(type);
+        }
+    fprintf(stdout, "   SUM - Nb transmitted packets              :%d\n",	nb_pk_tx);
+    fprintf(stdout, "   SUM - Nb received packets                 :%d\n",	nb_pk_rx);
+    fprintf(stdout, "\n\n");
+    
+        
+    if (nb_pk_sent_up + nb_pk_sent_down > 0 || !param_debug()){
+       
+        fprintf(stdout, "--------- DATA UNICAST ------------\n");
+        fprintf(stdout, "BIDIR_UN - Number pkts sent                  :%d\n",	nb_pk_sent_up + nb_pk_sent_down);
+        fprintf(stdout, "BIDIR_UN - Number pkts received              :%d\n",	nb_pk_rcvd_up + nb_pk_rcvd_down);
+        fprintf(stdout, "BIDIR_UN - PDR                               :%f\n",	(double) (nb_pk_rcvd_up + nb_pk_rcvd_down) / (nb_pk_sent_up + nb_pk_sent_down));
+        fprintf(stdout, "BIDIR_UN - Avg end-to-end delay (s)          :%f\n",	(double) (delay_up + delay_down) / (1e9 * (nb_pk_rcvd_up+ nb_pk_rcvd_down)));
+        fprintf(stdout, "BIDIR_UN - Jain Index                        :%f\n",	jain_index);
+        if (nb_pk_rcvd_up + nb_pk_rcvd_down > 0)
+            fprintf(stdout, "BIDIR_UN - Avg route length                  :%f\n",	(double)(route_length_cumul_up + route_length_cumul_down) / (nb_pk_rcvd_up + nb_pk_rcvd_down));
+        else
+            fprintf(stdout, "BIDIR_UN - Avg route length                  :nan\n");
+        fprintf(stdout, "\n");
+        
+        
+        fprintf(stdout, "-- UP_UNICAST --\n");
+        fprintf(stdout, "UP_UN - Number pkts sent                     :%d\n",	nb_pk_sent_up);
+        fprintf(stdout, "UP_UN - Number pkts received                 :%d\n",	nb_pk_rcvd_up);
+        fprintf(stdout, "UP_UN - PDR                                  :%f\n",	(double) nb_pk_rcvd_up / nb_pk_sent_up);
+        fprintf(stdout, "UP_UN - Avg end-to-end delay (s)             :%f\n",	(double)delay_up / (1e9 * nb_pk_rcvd_up));
+        fprintf(stdout, "UP_UN - Avg route length                     :%f\n",	(double)route_length_cumul_up / nb_pk_rcvd_up);
+        fprintf(stdout, "\n");
+        
+        fprintf(stdout, "-- DOWN --\n");
+        fprintf(stdout, "DOWN_UN - Number pkts sent                   :%d\n",	nb_pk_sent_down);
+        fprintf(stdout, "DOWN_UN - Number pkts received               :%d\n",	nb_pk_rcvd_down);
+        fprintf(stdout, "DOWN_UN - PDR                                :%f\n",	(double) nb_pk_rcvd_down / nb_pk_sent_down);
+        fprintf(stdout, "DOWN_UN - Avg end-to-end delay (s)           :%f\n",	(double)delay_down / (1e9 * nb_pk_rcvd_down));
+        fprintf(stdout, "DOWN_UN - Avg route length                   :%f\n",	(double)route_length_cumul_down / nb_pk_rcvd_down);
+        fprintf(stdout, "\n");
+        
+        fprintf(stdout, "-- DROPS (UP UNICAST DIRECTION) --\n");
+        fprintf(stdout, "UN - Too many CCA (%%)                        :%f\n",	(double)nb_drop_cca		/ nb_drop_up);
+        fprintf(stdout, "UN - Too many retx (%%)                       :%f\n",	(double)nb_drop_retx	/ nb_drop_up);
+        fprintf(stdout, "UN - Not yet associated (%%)                  :%f\n",	(double)nb_drop_assoc	/ nb_drop_up);
+        fprintf(stdout, "UN - Too long time in the buffer (%%)         :%f\n",	(double)nb_drop_buf_timeout	/ nb_drop_up);
+        fprintf(stdout, "UN - other (%%)                               :%f\n",	1 - (double)(nb_drop_cca + nb_drop_retx + nb_drop_assoc + nb_drop_buf_timeout) / nb_drop_up);
+        fprintf(stdout, "\n\n");
+        
+        /*	fprintf(stdout, "--------- PERFS PER FLOW ------------\n");
+         for(i=0; i<nb_nodes; i++)
+         if(flow_nb_pk_sent[i] > 0){
+         fprintf(stdout, "PDR - %3d                                 %f\n",	i, (double) flow_nb_pk_rcvd[i] / flow_nb_pk_sent[i]);
+         fprintf(stdout, "Avg end-to-end delay - %3d (s)             %f\n",	i, (double) flow_delay[i] / (1e9 * flow_nb_pk_rcvd[i]));
+         }
+         */	  
+    }
+    
+
+    
+    
+  	//memory
+	free(flow_nb_pk_sent);
+	free(flow_nb_pk_rcvd);
+	free(flow_delay);
+	
+}
+
+//copy a list of nodeid_t into a string
+char *stats_list_to_str(uint16_t *plist, char *msg, int length){
+    forward_info    *forward_elem;
+    char            *tempo = malloc(sizeof(char) * length);
+    
+    //init
+    strncpy(msg, "|", length);
+    
+    //wlak in the list
+    das_init_traverse(plist);
+    while ((forward_elem = (forward_info*) das_traverse(plist)) != NULL){
+        snprintf(tempo, length, "%d|", forward_elem->nodeid);
+        strncat(msg, tempo, length);
+    }
+    //flush
+    strncat(msg, "|", length);
+    free(tempo);
+    
+    return(msg);
+}
+
+//print the stats associated to data forwarding
+void stats_print_data_multicast(call_t *c){
+    //control
+    stat_cbr_info	*stat_elem;
+    forward_info    *forward_elem;
+    char            msg[150];
+  	
+    //statistics
+    int             nb_pk = 0;
+    int             nb_nodes = get_node_count();
+    double          cumul_pdr_radio = 0;
+    double          cumul_pdr_ctree = 0;
+    double          cumul_delay = 0;
+    double          cumul_pdr_flooding = 0;
+    
+    //debug
+    if (param_debug() && 1)
+        fprintf(stdout, "SRC	SEQNUM		SENT    %35s %35s %35s\n",
+                "RADIO",
+                "CTREE",
+                "RECEIVERS");
+                
+    //walk in the data stats
+    das_init_traverse(global_cbr_stats);
+	stat_elem = NULL;
+	while ((stat_elem = (stat_cbr_info*) das_traverse(global_cbr_stats)) != NULL){
+      //unicast packets
+		if ((stat_elem->time_generated < get_time() - STATS_STOP_BEFORE_END) && (tools_is_addr_multicast(stat_elem->dest))){
+            
+            //DEBUG
+            if (param_debug() && 1){
+                fprintf(stdout, " %d	%d		%f", \
+                        stat_elem->src, \
+                        stat_elem->sequence, \
+                        (double)stat_elem->time_generated / 1e9);
+                
+                //print the list of neighbors (radio&ctree) + receivers
+                fprintf(stdout, " %d=%30s ", das_getsize(stat_elem->neigh_radio), stats_list_to_str(stat_elem->neigh_radio, msg, 150));
+                fprintf(stdout, " %d=%30s ", das_getsize(stat_elem->neigh_ctree), stats_list_to_str(stat_elem->neigh_ctree, msg, 150));
+                fprintf(stdout, " %d=%30s ", das_getsize(stat_elem->neigh_rcvd), stats_list_to_str(stat_elem->neigh_rcvd, msg, 150));
+                fprintf(stdout, "\n"); 
+              }
+            
+            //stats
+            if (das_getsize(stat_elem->neigh_ctree) > 0){
+                nb_pk++;
+                cumul_pdr_radio     += (double)das_getsize(stat_elem->neigh_rcvd) / das_getsize(stat_elem->neigh_radio);
+                cumul_pdr_ctree     += (double)das_getsize(stat_elem->neigh_rcvd) / das_getsize(stat_elem->neigh_ctree);
+                cumul_pdr_flooding  += (double)das_getsize(stat_elem->neigh_rcvd) / nb_nodes;
+                
+                //average delay for all the receivers
+                das_init_traverse(stat_elem->neigh_rcvd);
+                while ((forward_elem = (forward_info*) das_traverse(stat_elem->neigh_rcvd)) != NULL)
+                    cumul_delay += (double)(forward_elem->time - stat_elem->time_generated) / (1e9 * das_getsize(stat_elem->neigh_rcvd));   
+           }            
+         }
+    }
+        
+        
+    fprintf(stdout, "--------- DATA MULTICAST ------------\n");
+	fprintf(stdout, "MULTI - Nb transmitted packets               :%d\n",	nb_pk);
+	fprintf(stdout, "MULTI - Packet Delivery Ratio (radio neigh)  :%f\n",	cumul_pdr_radio / nb_pk);
+	fprintf(stdout, "MULTI - Packet Delivery Ratio (ctree neigh)  :%f\n",	cumul_pdr_ctree / nb_pk);
+	fprintf(stdout, "MULTI - Packet Delivery Ratio (flooding)     :%f\n",	cumul_pdr_flooding / nb_pk);
+	fprintf(stdout, "MULTI - Average delay                        :%f\n",	cumul_delay / nb_pk);
+	fprintf(stdout, "\n\n");
+}
+
+
+//----------------------------------------------
+//				STATS - STRUCTURE
+//----------------------------------------------
+
+
+
+
+//the node is associated, save the association stat (time)
+void stats_register_association(call_t *c){
+	
+	if (c->node >= get_node_count())
+		tools_exit(15, c, "tools_stat_register_association(), addr %d invalid\n", c->node);
+
+	
+	//only the first association is registered
+	if (global_ctree_stats[c->node].association_time == 0)
+		global_ctree_stats[c->node].association_time = get_time();	
+
+}
+
+//all the stats measuring the efficiency of the cluster-tree structure
+void stats_print_structure(call_t *c){
+	//params
+	int			nb_nodes = get_node_count();
+	
+	//association
+	double		avg_association_time = 0;
+	int			nb_nodes_associated = 0;
+	int			nb_coord_with_children = 0;
+	int			nb_children_cumul = 0;
+	int			nb_parents_cumul = 0;
+	
+	//BOP collisions
+	short		coll_beacon;
+	int			nb_coll_beacons = 0;
+	int			nb_coll_beacons_with_children = 0;
+	
+	//SFslot collisions
+	short		coll_sf;
+	int			nb_coll_sf = 0;
+	int			nb_coll_sf_with_children = 0;
+	
+	//control
+	int			i, j;
+	
+	//depth
+	int			depth_max = -1;
+	int			depth_cumul = 0;
+	int			nb_nodes_connected = 0;
+	
+	
+	//----------- CLUSTERTREE PROPERTIES ------------
+
+	//Association stats + properties of the cluster-tree
+	for(i=0; i<nb_nodes; i++)
+		if (global_ctree_stats[i].association_time != 0){
+			nb_nodes_associated ++;
+			
+			//conversion in seconds
+			avg_association_time += (double)global_ctree_stats[i].association_time / 1e9;			
+			
+			//nb of coord with children
+			if (neigh_table_get_nb_children(god_knowledge[i]->neigh_table) > 0){
+				//	printf("%d has children\n", i);
+				nb_coord_with_children++;
+			}
+			nb_children_cumul += neigh_table_get_nb_children(god_knowledge[i]->neigh_table);
+			
+			//Nb of parents per node
+			//	printf("parents for %d\n", i);
+			nb_parents_cumul += ctree_parent_get_nb_associated(god_knowledge[i]->parents);
+			
+			//depth
+			int	int_value;
+			if ((int_value = routing_get_depth(i)) > 0){
+				depth_cumul += int_value;
+				nb_nodes_connected ++;
+				
+				if (int_value > depth_max)
+					depth_max = int_value;				
+				}				
+		}
+	
+	
+	fprintf(stdout, "--------- STRUCTURE PERFS ------------\n");
+	fprintf(stdout, "Association time (s)                         :%f\n",	avg_association_time / nb_nodes_associated);
+	fprintf(stdout, "Associated Ratio                             :%f\n",	(double)nb_nodes_associated / (nb_nodes - 1));
+	fprintf(stdout, "Ratio of Coord with children                 :%f\n",	(double)nb_coord_with_children / nb_nodes);
+	fprintf(stdout, "Avg nb children per coord                    :%f\n",	(double)nb_children_cumul / nb_coord_with_children);
+	fprintf(stdout, "Avg nb of parents                            :%f\n",	(double)nb_parents_cumul / (nb_nodes - 1));
+	fprintf(stdout, "Average Route length (hops)                  :%f\n",	(double)depth_cumul / nb_nodes_connected);
+	fprintf(stdout, "Tree / DAG Depth                             :%d\n",	depth_max);
+	fprintf(stdout, "\n\n");
+	
+	
+	//----------- COLLISIONS AMONG SUPERFRAMES ------------
+	
+	//BOP collisions
+	for(i=0; i<nb_nodes; i++)
+		if (global_ctree_stats[i].association_time != 0){
+			coll_beacon = FALSE;
+			for(j=0; !coll_beacon && j<nb_nodes; j++)
+				if ((global_ctree_stats[j].association_time != 0) && (tools_graph_nodes_interf(i, j)))
+					
+					//same BOP slot
+					if ((i != j) && (god_knowledge[i]->sframe.my_bop_slot == god_knowledge[j]->sframe.my_bop_slot))
+						
+						//same superframe
+						if (god_knowledge[i]->sframe.my_sf_slot == god_knowledge[j]->sframe.my_sf_slot){
+							coll_beacon = TRUE;
+							nb_coll_beacons ++;
+							//if (param_debug())
+							//	fprintf(stdout, "coll beacon %d / %d\n", i, j);
+							
+							if ((neigh_table_get_nb_children(god_knowledge[i]->neigh_table) > 0) && (neigh_table_get_nb_children(god_knowledge[j]->neigh_table) > 0))
+								nb_coll_beacons_with_children++;
+						}
+		}
+	
+	//SF slots collisions
+	for(i=0; i<nb_nodes; i++)
+		if (global_ctree_stats[i].association_time != 0){
+			coll_sf = FALSE;
+			for(j=0; !coll_sf && j<nb_nodes; j++)
+ 
+				if ((global_ctree_stats[i].association_time != 0) && (tools_graph_nodes_interf(i, j)))
+					
+					//same superframe
+					if ((i != j) && (god_knowledge[i]->sframe.my_sf_slot == god_knowledge[j]->sframe.my_sf_slot)){
+                        
+						coll_sf = TRUE;
+						nb_coll_sf ++;
+                        //tools_debug_print(c, "coll sf %d / %d (%d - %d)\n", 
+                        //                  i, 
+                        //                  j, 
+                        //                  neigh_table_get_nb_children(god_knowledge[i]->neigh_table) > 0, 
+                        //                  neigh_table_get_nb_children(god_knowledge[j]->neigh_table) > 0);
+						
+						if ((neigh_table_get_nb_children(god_knowledge[i]->neigh_table) > 0) && (neigh_table_get_nb_children(god_knowledge[j]->neigh_table) > 0))
+							nb_coll_sf_with_children++;
+					}	
+
+		}
+	
+	fprintf(stdout, "--------- SCHEDULING ------------\n");
+	fprintf(stdout, "Beacon Collision Ratio (wihout children)     :%f\n",	(double)nb_coll_beacons / nb_nodes_associated);
+	fprintf(stdout, "Beacon Collision Ratio (with children)       :%f\n",	(double)nb_coll_beacons_with_children / nb_nodes_associated);
+	fprintf(stdout, "Superframe Collision Ratio (wihout children) :%f\n",	(double)nb_coll_sf / nb_nodes_associated);
+	fprintf(stdout, "Superframe Collision Ratio (with children)   :%f\n",	(double)nb_coll_sf_with_children / nb_nodes_associated);
+	fprintf(stdout, "\n\n");
+	
+	
+	
+	//----------- HIDDEN TERMINALS ------------
+	int		nb_links_hidden_terminals = 0;
+	int		nb_links_total = 0;
+	short	interf_found;
+	
+	int		node, node2, parent, parent2;
+	
+	//constructs the graph of links labeled by their superframe
+	int **graph_sf;
+	graph_sf = malloc(nb_nodes * sizeof(int*));
+	for(i=0; i<nb_nodes; i++){
+		graph_sf[i] = calloc(nb_nodes, sizeof(int));
+	}
+
+	for(node=0; node<nb_nodes; node++)
+		if (global_ctree_stats[node].association_time != 0){
+			
+			//printf("%d -> %d parents\n", node, ctree_parent_get_nb_associated(god_knowledge[node]->parents));
+			
+			//for each of its parents
+			for(parent=0; parent<nb_nodes; parent++)
+				  if (ctree_parent_associated_get_info(god_knowledge[node]->parents, parent)){
+					  graph_sf[node][parent] = 1 + god_knowledge[parent]->sframe.my_sf_slot;		//offset of 1 to forbid the 0 value (means we don't have here a link!)
+					  //printf("inserted %d\n", parent);
+				  }
+		}
+	
+	//walk in the graph: for each link, searches for an interfering link with the same superframe slot
+	for(node=0; node<nb_nodes; node++)
+		for(parent=0; parent<nb_nodes; parent++)			
+			if (graph_sf[node][parent] != 0){
+				interf_found = FALSE;
+				
+				for(node2=0; node2<nb_nodes && !interf_found; node2++)
+					for(parent2=0; parent2<nb_nodes && !interf_found; parent2++)
+						if (tools_graph_links_interf(node, parent, node2, parent2))
+							if ((parent != parent2) && (graph_sf[node2][parent2] != 0) && (graph_sf[node][parent] == graph_sf[node2][parent2])){
+								interf_found = TRUE;
+								//printf("interf link: %d->%d\n", node2, parent2);
+							}
+				
+				if (interf_found)
+					nb_links_hidden_terminals++;
+				nb_links_total++;
+				
+			//	printf("link %d->%d : bool %d\n", node, parent, interf_found);
+			}
+	
+	fprintf(stdout, "--------- INTERFERENCES ------------\n");
+	fprintf(stdout, "Number of radio links                        :%d\n",	nb_links_total);
+	fprintf(stdout, "Ratio with at least one hidden terminal      :%f\n",	(double)nb_links_hidden_terminals / nb_links_total);
+	fprintf(stdout, "\n\n");
+	
+	//memory
+	for(i=0; i<nb_nodes; i++)
+		free(graph_sf[i]);
+	free(graph_sf);
+}
+
+
+
+
+
+//----------------------------------------------
+//				STATS - ENERGY
+//----------------------------------------------
+
+
+
+//all the stats concerning energy consumption
+void stats_print_energy(call_t *c){
+	int			nb_nodes = get_node_count();
+    int         i, j;
+  
+   
+    //energy consummed for each node
+    double      global_consumption[RADIO_NB_MODES];
+    uint64_t    global_duration[RADIO_NB_MODES];
+    
+    //initialization
+    for(j=0; j<RADIO_NB_MODES; j++){
+        global_consumption[j]   = 0;
+        global_duration[j]      = 0;
+    }        
+    
+    //global stats
+    for(i=0; i<nb_nodes; i++) 
+        for(j=0; j<RADIO_NB_MODES; j++){
+            if (god_knowledge[i]->radio_energy == NULL)
+                tools_exit(3, c, "[RADIO] the MAC layer did not get the radio energy consumption from the radio module (It must get a pointer toward the energy consumption structure before reading its value\n");
+            
+            global_consumption[j]   += god_knowledge[i]->radio_energy->consumption[j];
+            global_duration[j]      += god_knowledge[i]->radio_energy->duration[j];            
+        }
+    
+    
+    //ENERGY Consumption per node
+    if (nb_nodes < 0){        
+        fprintf(stdout, "--------- ENERGY PER NODE ------------\n");
+        for(i=0; i<nb_nodes; i++) 
+           for(j=0; j<RADIO_NB_MODES; j++)
+            fprintf(stdout, "NODE %2d (%3s:Joules)                         :%e\n", i, radio_mode_to_str(j), god_knowledge[i]->radio_energy->consumption[j]);
+        fprintf(stdout, "\n\n");
+     }
+    
+    //On average
+   	fprintf(stdout, "--------- ENERGY GLOBAL ------------\n");
+    for(j=0; j<RADIO_NB_MODES; j++){
+        fprintf(stdout, "Mode %3s (Joule)                             :%e\n", radio_mode_to_str(j), global_consumption[j] / nb_nodes);
+    }
+    for(j=0; j<RADIO_NB_MODES; j++){
+        fprintf(stdout, "Mode %3s (ratio of time)                     :%f\n", radio_mode_to_str(j), (double)global_duration[j] / (get_time() * nb_nodes));
+    }
+    
+    if (!param_debug())
+        return;
+    
+    
+    //DEBUG
+/*    printf("ENERGY CONSUMPTION - node id   ");
+    for(i=0; i<RADIO_NB_MODES; i++)
+        printf("%s(mJ)  ", radio_mode_to_str(i));
+    printf("\n");
+    
+    //retrives the energy for each radio module
+    for(i=0; i<nb_nodes; i++){ 
+        printf("ENERGY CONSUMPTION - %d: ", i);
+        
+        //printf("ptr %d\n", (int) god_knowledge[i]->radio_energy);        
+        for(j=0; j<RADIO_NB_MODES; j++)
+            printf("%f ", god_knowledge[i]->radio_energy->consumption[j] * 1e3);
+        printf("\n");
+    }
+  */  
+    
+    //DEBUG
+    printf("ERNERGY DURATION - id (in ratio of time)  ");
+    for(i=0; i<RADIO_NB_MODES; i++)
+        printf("%s  ", radio_mode_to_str(i));
+    printf("\n");
+    
+    char msg[150];
+    //retrives the energy for each radio module
+    for(i=0; i<nb_nodes; i++){ 
+        printf("ENERGY DURATION - %d: ", i);
+                
+        //printf("ptr %d\n", (int) god_knowledge[i]->radio_energy);        
+        for(j=0; j<RADIO_NB_MODES; j++){
+            
+            tools_time_to_str(god_knowledge[i]->radio_energy->duration[j], msg, 150); 
+            
+            printf("\t (");
+            
+            printf("=%fs ", god_knowledge[i]->radio_energy->duration[j] / 1e9);
+            
+            printf(" = %fJ)", god_knowledge[i]->radio_energy->consumption[j] * 1e3);
+            
+        }
+        printf("\n");
+    }
+   
+}
+
+
+//----------------------------------------------
+//				STATS
+//----------------------------------------------
+
+
+
+
+//CBR stats
+void stats_print_all(call_t *c){
+	
+	//parameters
+	int			degree_cumul = 0;
+	int			nb_nodes = get_node_count();
+	//control
+	int			i;
+	
+	if (param_debug())
+		tools_generate_figures(c); 	
+	
+	//degree
+	for(i=0; i<nb_nodes; i++)
+		degree_cumul += das_getsize(god_knowledge[i]->neigh_table);
+	
+	
+	fprintf(stdout, "--------- IEEE 802.15.4 PARAMETERS ------------\n");
+	fprintf(stdout, "SEED                                       :%lu\n",get_rng_seed());		///I modified RNG.h and rng.h in wsnet to save and return on demand the seed used for the simulation
+	fprintf(stdout, "BO value                                   :%d\n",	param_get_global_bo());
+	fprintf(stdout, "SO value                                   :%d\n",	param_get_global_so());
+	fprintf(stdout, "CW value                                   :%d\n",	CW);
+	fprintf(stdout, "BOP algo (int)                             :%d\n",	param_get_bop_algo());
+	fprintf(stdout, "BOP algo (str)                             :%s\n",	tools_bop_algo_to_str(param_get_bop_algo()));
+	fprintf(stdout, "Multicast algo (int)                       :%d\n",	param_get_multicast_algo());
+	fprintf(stdout, "Multicast algo (str)                       :%s\n",	tools_multicast_algo_to_str(param_get_multicast_algo()));
+    fprintf(stdout, "Multicast dest (int16)                     :%d\n", param_get_dest_multicast(c));
+	fprintf(stdout, "BOP number of slots                        :%d\n",	param_get_bop_nb_slots());
+	fprintf(stdout, "Superframe scheduling algo (int)           :%d\n",	param_get_algo_sf());
+	fprintf(stdout, "Superframe scheduling algo (str)           :%s\n",	tools_algo_sf_to_str(param_get_algo_sf()));	
+	fprintf(stdout, "Max number of parents                      :%d\n",	param_get_nb_max_parents());
+	fprintf(stdout, "Depth metric (int)                         :%d\n",	param_get_depth_metric());
+	fprintf(stdout, "Depth metric (str)                         :%s\n",	tools_depth_metric_to_str(param_get_depth_metric()));
+	
+    fprintf(stdout, "--------- ENVIRONMENT PARAMETERS ------------\n");
+	fprintf(stdout, "Number of nodes                            :%d\n",	nb_nodes);
+	fprintf(stdout, "Interference Range (used for stats only)   :%f\n",	INTERF_RANGE);      //to extract which nodes interfere with each other to estimate roughly the number of colliding superframes in stats
+	fprintf(stdout, "Duration (s)                               :%f\n",	(double)get_time() / 1e9);
+	fprintf(stdout, "Degree                                     :%f\n",	(double)degree_cumul / get_node_count());
+	fprintf(stdout, "Unicast - Inter Packet Time (s)            :%f\n",	(double)param_get_inter_pk_time_unicast(c) * 1e-9);
+	fprintf(stdout, "Multicast - Inter Packet Time (s)          :%f\n",	(double)param_get_inter_pk_time_multicast(c) * 1e-9);
+	fprintf(stdout, "Multicast - Destination (int)              :%d\n",	multicast_last_destination);
+	fprintf(stdout, "Multicast - Destination (str)              :%s\n",	tools_multicast_addr_to_str(multicast_last_destination));
+	fprintf(stdout, "\n\n");
+	
+	//particular stats
+ 	stats_print_data_unicast(c);
+ 	stats_print_data_multicast(c);
+	stats_print_structure(c);
+    stats_print_energy(c);
+    stats_print_connectivity(c);
+    
+    
+	
+	//stats for CBR packets
+	das_destroy(global_cbr_stats);
+	global_cbr_stats = NULL;
+	
+	//stats for association
+	free(global_ctree_stats);
+	global_ctree_stats = NULL;
+    
+ 	
+}
+

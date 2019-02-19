@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<worldsens xmlns="http://worldsens.citi.insa-lyon.fr">
+
+
+<!-- == Worldsens ===================================================== -->
+<simulation nodes="70" duration="7200s" x="1000" y="1000" z="0"/>
+
+
+
+<!-- == Entities ====================================================== -->
+
+
+
+<!-- == PROPAGATION, INTERFERENCES and MODULATION ===================== -->
+<entity name="propagation" library="propagation_shadowing_802154_mine">
+    <init frequency_MHz="868" pathloss="2.5" deviation="2" dist0="4.0" Pr_dBm0="-54"/>
+</entity>
+
+<!--<entity name="propagation" library="propagation_range">
+  <init range="30"/>
+</entity> -->
+
+<entity name="interference" library="interferences_orthogonal">
+</entity>
+
+<entity name="modulation" library="modulation_bpsk">
+</entity>
+
+
+
+<!-- == ANTENNA ============================================ -->
+<entity name="omnidirectionnal" library="antenna_omnidirectionnal">
+</entity>
+
+
+
+<!-- == RADIO ============================================ -->
+<!-- cf p52 ref 802.15.4-2006, 868/915 MHz band radio specification: a compliant device shall be capable of achieving a sensitivity of –92 dBm or better. -->
+<entity name="radio" library="radio_generic_mine" >
+  <default sensibility="-92dBm" T_s="4000" channel="0" modulation="modulation"/>
+</entity>
+	
+
+
+<!-- == MAC ===================================================== -->
+<!--<entity name="mac" library="mac_802_15_4_mine">
+</entity>-->
+<!-- depth metric: hops=1, etx=2, ber=3-->
+<entity name="mac" library="mac_802154_slotted" >
+  <default BO="7" SO="2" bop-slots="4" bop-algo="1" sf-algo="3" nbmax-parents="3" depth-metric="3" multicast-algo="2" hello-boperiod="1" monitorbeacons="1" scan-boperiod="10" debug="0"/>
+</entity>
+
+
+
+<!-- == ROUTING ===================================================== -->
+<!-- ocp using metric: hop count=0, etx=1, elt=5, residual_eng=6-->
+<entity name="RPL" library="routage_rpl">
+	<default ocp="1"/>
+</entity>
+
+
+
+<!-- == APPLICATION ===================================================== -->
+<entity name="app_cbr" library="application_cbr_mine">
+	<default period="60s" destination="0"/>
+</entity>
+
+
+
+<!-- == MOBILITY ===================================================== -->
+<entity name="static-pos" library="mobility_static_disk_mine">
+  <default x="random" y="random" z="random"/>
+</entity>
+
+<!--<entity name="static-pos" library="mobility_filestatic">
+  <init file="/home/otiova/wsnet-module/user_models/wsnet-154-rpl/wsnet_rpl/graphtest50.data"/>
+</entity>-->
+
+
+
+<!-- == Environment ===================================================== -->
+<environment>
+    <propagation entity="propagation"/>
+	<interferences entity="interference"/>
+    <modulation entity="modulation"/>
+</environment>
+
+
+
+<!-- == Bundle ===================================================== -->
+<bundle name="RPL_node" worldsens="false" default="true" birth="0">
+  <mobility entity="static-pos"/>
+    
+  <antenna entity="omnidirectionnal">
+    <up entity="radio"/>
+  </antenna>
+
+  <with entity="radio">
+    <up entity="mac"/>
+    <down entity="omnidirectionnal"/>
+  </with>
+
+  <with entity="mac">
+    <up entity="RPL"/>
+    <down entity="radio"/>
+  </with>
+
+  <with entity="RPL">
+	<up entity="app_cbr"/>
+    <down entity="mac"/>
+  </with>
+  
+  <with entity="app_cbr">
+	<down entity="RPL"/>
+  </with>
+
+</bundle>
+
+</worldsens>

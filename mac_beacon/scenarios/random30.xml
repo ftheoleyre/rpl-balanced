@@ -1,0 +1,115 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<worldsens xmlns="http://worldsens.citi.insa-lyon.fr">
+
+
+<!-- == Worldsens ===================================================== -->
+<simulation nodes="30" duration="100s" x="150" y="150" z="0"/>
+
+
+<!-- == Entities ====================================================== -->
+
+
+<!-- == PROPAGATION, INTERFERENCES and MODULATION ===================== -->
+<entity name="propagation" library="propagation_shadowing_802154">
+    <init frequency_MHz="868" pathloss="1.97" deviation="2.1" dist0="2.0" Pr_dBm0="-61.4"/>
+</entity>
+
+
+<!--
+<entity name="propagation" library="propagation_range" >
+  <init  range="50"/>
+</entity>
+-->
+
+
+<entity name="interference" library="interferences_orthogonal">
+</entity>
+
+<entity name="modulation" library="modulation_bpsk">
+</entity>
+
+
+
+
+<!-- == ANTENNA ============================================ -->
+<entity name="omnidirectionnal" library="antenna_omnidirectionnal">
+</entity>
+
+
+
+
+<!-- RADIO ============================================ -->
+<!-- Ts=Tb=4us (250kbps wth one bit per symbol) -->
+<entity name="radio" library="radio_generic" >
+    <default sensibility="-90dBm" T_s="4000" channel="0" modulation="modulation"/>
+</entity>
+
+
+
+
+
+<!-- == MAC ===================================================== -->
+<entity name="mac" library="mac_802154_slotted" >
+  <default BO="7" SO="2" bop-slots="4" bop-algo="2" sf-algo="3" nbmax-parents="5" depth-metric="3" multicast-algo="2" hello-boperiod="1" monitorbeacons="1" scan-boperiod="10" debug="0"/>
+</entity>
+
+
+
+<!-- == MOBILITY ===================================================== -->
+<entity name="static" library="mobility_static_disk">
+  <default x="random" y="random" z="random"/>
+</entity>
+
+
+
+<!-- == APPLI ===================================================== -->
+
+<entity name="cbr" library="application_cbr_v3">
+    <default start="90s" unicast-period="0s" multicast-period="180s" multicast-dest="ctree"/> 
+</entity>
+
+
+
+
+
+
+<!-- == Environment ===================================================== -->
+<environment>
+    <propagation entity="propagation"/>
+    <interferences entity="interference"/>
+    <modulation entity="modulation"/>
+</environment>
+
+
+
+<!-- == Bundle ===================================================== -->
+<bundle name="node" worldsens="false" default="true" birth="0">
+  <mobility entity="static"/>
+
+  <antenna entity="omnidirectionnal">
+    <up entity="radio"/>
+  </antenna>
+
+  <with entity="radio">
+    <up entity="mac"/>
+    <down entity="omnidirectionnal"/>
+  </with>
+
+  <with entity="mac">
+    <up entity="cbr"/>
+    <down entity="radio"/>
+  </with>
+  
+  
+  <with entity="cbr">
+	<down entity="mac"/>
+  </with>
+
+
+</bundle>
+
+
+<!-- == Nodes ===================================================== -->
+
+
+</worldsens>

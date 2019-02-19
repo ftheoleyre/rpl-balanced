@@ -1,0 +1,59 @@
+-------------------
+WSNET modifications
+-------------------
+
+We had modified the original wsnet core implementation.
+In particular, we inserted new functions to obtain the seed used by the simulator (used in the printout to be able to replay a scenario with the same seed if required). In the same way, we changed also the manner to initialize the seed.
+
+#You must copy the following wsnet modifications
+cp wsnet-modif/rng.* $WSNET_SRC/src/
+
+# and recompile the wsnet simulator
+cd $WSNET_SRC/src
+make
+make install
+
+
+-----------------
+INSTALL
+-----------------
+
+
+#Please follow the classical instructions for a wsnet module installation
+glibtoolize
+./bootstrap
+./configure --enable-debug
+make
+make install
+
+
+
+-----------------
+TOOLS
+-----------------
+
+
+#to verify you don't have memory leaks, you may use valgrind, with e.g.:
+valgrind --tool=memcheck  --db-attach=yes --leak-check=full --show-reachable=yes 
+
+
+-----------------
+MAKEFILE
+-----------------
+
+#you may include in the makefile the corresponding scenarios:
+line: install-recursive
+	wsnet -c scenarios/line3.xml
+rand10: install-recursive
+	wsnet -c scenarios/random10.xml
+rand30: install-recursive
+	wsnet -c scenarios/random30.xml
+rand50: install-recursive
+	wsnet -c scenarios/random50.xml
+star: install-recursive
+	wsnet -c scenarios/star3.xml
+
+
+Thus, by entering  #make rand30, you will test a random topology of 30 nodes
+
+

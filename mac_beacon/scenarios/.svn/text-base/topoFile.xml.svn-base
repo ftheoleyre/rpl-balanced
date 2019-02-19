@@ -1,0 +1,135 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<worldsens xmlns="http://worldsens.citi.insa-lyon.fr">
+
+<!-- == Worldsens ===================================================== -->
+<simulation nodes="81" duration="450s" x="2000" y="2000" z="0"/>
+
+
+<!-- == Entities ====================================================== -->
+
+
+<!-- == BATTERY ===================== -->
+
+<!--
+<entity name="battery" library="energy_linear">
+	<default energy="999000000007"/>
+</entity>
+-->
+
+<!-- == PROPAGATION, INTERFERENCES and MODULATION ===================== -->
+<entity name="propagation" library="propagation_shadowing_802154">
+    <init frequency_MHz="868" pathloss="2.5" deviation="2" dist0="2.0" Pr_dBm0="-54"/>
+</entity>
+
+<entity name="interference" library="interferences_orthogonal">
+</entity>
+
+<entity name="modulation" library="modulation_bpsk">
+</entity>
+
+
+<!-- == ANTENNA ============================================ -->
+<entity name="omnidirectionnal" library="antenna_omnidirectionnal">
+</entity>
+
+<!-- RADIO ============================================ -->
+<!-- Ts=Tb=4us (250kbps wth one bit per symbol) -->
+<entity name="radio" library="radio_generic" >
+    <default sensibility="-75dBm" T_s="4000" channel="0" modulation="modulation"/>
+</entity>
+
+<!--
+#define	RANK_HOPS							0
+#define	RANK_EBX							1
+
+#define PARENT_SELECT_EBX					0
+#define PARENT_SELECT_CAPA					1
+#define PARENT_SELECT_DIVER					2
+#define PARENT_SELECT_FIRST					3
+#define PARENT_SELECT_RND					4
+#define PARENT_SELECT_ALL					5
+
+#define	START_ALL							0
+#define	START_WAVE							1
+#define	START_RND_WAVE						2
+#define	START_RND_CHAIN						3
+-->
+
+
+<!-- == MAC ===================================================== -->
+<entity name="mac" library="mac_802154_slotted">
+  <default rank="1" par-metric="5" start="3" nb-bcn-wait="4" nbmax-parents="3" depth-metric="3" debug="1" BO="7" SO="2" bop-slots="3" bop-algo="2" algo-sf="4" hello-boperiod="1" monitorbeacons="1" scan-boperiod="10"/>
+</entity>
+
+
+<!-- == APPLICATION ===================================================== -->
+
+<entity name="cbr" library="application_cbr_v3">
+    <default start="600s" unicast-period="5s"/>
+</entity>
+
+<!-- == MOBILITY ===================================================== -->
+<entity name="static-pos" library="mobility_filestatic">
+  <init file="graph.data"/>
+</entity>
+
+<!--
+<entity name="static-pos" library="mobility_static">
+  <default x="random" y="random" z="random"/>
+</entity>
+
+<entity name="static-pos" library="mobility_filestatic">
+  <init file="graph.data"/>
+</entity>
+-->
+
+
+
+<!-- == Environment ===================================================== -->
+<environment>
+    <propagation entity="propagation"/>
+    <interferences entity="interference"/>
+    <modulation entity="modulation"/>
+</environment>
+
+
+
+
+<!-- == Bundle ===================================================== -->
+<bundle name="sensor" worldsens="false" default="true" birth="0">
+  <mobility entity="static-pos"/>
+
+  <antenna entity="omnidirectionnal">
+    <up entity="radio"/>
+  </antenna>
+
+  <with entity="radio">
+    <up entity="mac"/>
+    <down entity="omnidirectionnal"/>
+  </with>
+
+  <with entity="mac">
+    <up entity="cbr"/>
+    <down entity="radio"/>
+  </with>
+
+
+  <with entity="cbr">
+	<down entity="mac"/>
+  </with>
+
+
+</bundle>
+
+
+<!-- == Nodes ===================================================== -->
+<!--
+<node id="0" as="sensor">
+  <for entity="static-pos" x="0" y="0" z="0" />
+</node>
+
+<node id="1" as="sensor">
+  <for entity="static-pos" x="5" y="0" z="0" />
+</node>
+-->
+</worldsens>

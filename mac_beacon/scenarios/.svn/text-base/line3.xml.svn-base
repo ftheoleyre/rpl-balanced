@@ -1,0 +1,114 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<worldsens xmlns="http://worldsens.citi.insa-lyon.fr">
+
+<!-- == Worldsens ===================================================== -->
+<simulation nodes="3" duration="90s" x="2000" y="2000" z="0"/>
+
+
+<!-- == Entities ====================================================== -->
+
+
+<!-- == PROPAGATION, INTERFERENCES and MODULATION ===================== -->
+<entity name="propagation" library="propagation_shadowing_802154">
+    <init frequency_MHz="868" pathloss="2.19" deviation="2" dist0="2.0" Pr_dBm0="-53.4dBm"/>
+</entity>
+
+<entity name="interference" library="interferences_orthogonal">
+</entity>
+
+<entity name="modulation" library="modulation_bpsk">
+</entity>
+
+
+
+
+<!-- == ANTENNA ============================================ -->
+<entity name="omnidirectionnal" library="antenna_omnidirectionnal">
+</entity>
+
+
+
+
+<!-- RADIO ============================================ -->
+<!-- Ts=Tb=4us (250kbps wth one bit per symbol) -->
+<entity name="radio" library="radio_generic" >
+    <default sensibility="-95dBm" T_s="4000" channel="0" modulation="modulation"/>
+</entity>
+
+
+
+
+
+<!-- == MAC ===================================================== -->
+<entity name="mac" library="mac_802154_slotted">
+  <default BO="5" SO="2" bop-slots="4" bop-algo="2" sf-algo="4" nbmax-parents="3" depth-metric="3" multicast-algo="1" multicast-ack="1" hello-boperiod="1" monitorbeacons="1" scan-boperiod="20" debug="1"/>
+</entity>
+
+
+
+<!-- == MOBILITY ===================================================== -->
+<entity name="static-pos" library="mobility_static">
+  <default x="random" y="random" z="random"/>
+</entity>
+
+
+
+
+<!-- == APPLI ===================================================== -->
+
+<entity name="cbr" library="application_cbr_v3">
+    <default start="30s" unicast-period="0s" multicast-period="30s" multicast-dest="ctree"/> 
+</entity>
+
+
+
+
+<!-- == Environment ===================================================== -->
+<environment>
+    <propagation entity="propagation"/>
+    <interferences entity="interference"/>
+    <modulation entity="modulation"/>
+</environment>
+
+
+
+
+<!-- == Bundle ===================================================== -->
+<bundle name="sensor" worldsens="false" default="true" birth="0">
+  <mobility entity="static-pos"/>
+
+  <antenna entity="omnidirectionnal">
+    <up entity="radio"/>
+  </antenna>
+
+  <with entity="radio">
+    <up entity="mac"/>
+    <down entity="omnidirectionnal"/>
+  </with>
+
+  <with entity="mac">
+    <up entity="cbr"/>
+    <down entity="radio"/>
+  </with>
+  
+  
+  <with entity="cbr">
+	<down entity="mac"/>
+  </with>
+</bundle>
+
+
+<!-- == Nodes ===================================================== -->
+<node id="0" as="sensor">
+  <for entity="static-pos" x="0" y="0" z="0" /> 
+</node>
+
+<node id="1" as="sensor">
+  <for entity="static-pos" x="49" y="0" z="0" />
+</node>
+
+<node id="2" as="sensor">
+  <for entity="static-pos" x="98" y="5" z="0" /> 
+</node>
+
+</worldsens>
