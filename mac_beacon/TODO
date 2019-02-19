@@ -1,0 +1,10 @@
+### TESTS ##
+
+Avec un arbre plus grand (testé actuellement avec seulement 2 noeuds)
+
+-un noeud colle sa supertrame juste derrière celle de son père (je voudrais tester dans un futur proche la BOP + scheduling des supetrames : ca ne devrait pas demander trop de boulot comme je l'ai structuré)
+-un ack est demandé pour tous les paquets de données (facile à modifier en prenant la transition vers STATE_CHILD_IDLE directement apres TXING)
+-pas de trames de management pour l'association (à faire dans un futur proche)
+-un seul père (mais prévu pour être changé : il suffit de regarder quand on se réveille à la fin de STATE_CHILD_IDLE, en parsant tous ses pères et en prenant le prochain qui se réveille)
+-seul le sens upload est implémenté (mais j'ai préparé la place pour greffer l'autre sens)
+

@@ -1,0 +1,272 @@
+/**
+ *  \file   types.h
+ *  \brief  types and structs
+ *  \author Fabrice Theoleyre
+ *  \date   2011
+ **/
+
+
+#include "../radio/radio_generic.h"
+
+#ifndef __TYPES_H__
+#define	__TYPES_H__
+
+#include "const.h"
+
+
+//-------------------------------------------
+//		STRUCT FOR PRIVATE PROPERTIES
+//-------------------------------------------
+
+typedef uint8_t depth_pk_t;
+
+//info on the cluster-tree hierarchy
+typedef struct{
+	double		depth;				//distance to the sink
+	uint16_t	addr_short;			//my parent
+	uint64_t	positive_notif;		//I MUST retrieve data before this date (i.e. I have pending packets)
+	uint8_t		sf_slot;			//slot of the superframe of my parent
+	uint8_t		bop_slot;			//slot in the Beacon Only Period (i.e. when it will transmit its beacon)
+	short		associated;			//was the association finalized?
+	uint64_t	last_hello_tx;		//The last time I transmitted an hello toward it
+}parent_info;
+
+
+
+
+//MAC information (current parameter's value)
+typedef struct{
+	//current values
+	int         cw;				//cw CCA before transmission
+	int         NB;				//Number of tryouts to test if chanel was busy
+    int         BE;				//Backoff Exponent
+	
+	//Nb of transmissions 
+	int			nb_retry;		//for the current pending packet
+    
+    //tx time
+    uint64_t    tx_end;         //several transmissions may be already scheduled (e.g. multicast -> we drop other requests meanwhile)
+}mac_info;
+
+
+
+
+//Superframe information (FTDMA, etc.)
+typedef struct{
+	//parameters
+	uint8_t		BO;
+	uint8_t		SO;
+	uint64_t	end_my_sframe;			//my superframe will finish at end_my_sframe
+	uint8_t		my_bop_slot;			//my BOP slot
+	uint8_t		my_sf_slot;				//the slot I use for my own superframe
+	event_t		*event_beacon_callback;	//my callback to generate my own beacon
+    event_t     *event_beacon_stop;     //stop waiting for a beacon
+    uint8_t     my_current_role;
+}sframe_info;
+
+
+//the finite state machine
+typedef struct{
+	int			state;			//state
+	uint64_t	clock;			//the clock to trigger the transition
+	int			intrpt_type;	//the type of interrupt (for instance packet reception)	
+	event_t		*event;			//pointer to the next FSM change scheduled
+}fsm_info;
+
+
+//in the down direction the node has to maintain a counter of nb of retransmissions
+typedef struct{
+	packet_t*	packet;
+	short		nb_retry;			//useful for the down direction
+	short		buffered;			//is this packet present in the buffer (i.e. is it a non-zero payload length?)
+	uint64_t	time_expiration;	//after that, I can drop the packet
+	uint64_t	time_insertion;		//the time the packet was insered in the queue
+	short		priority;			//the packet priority (larger prio -> will be txed first)
+    short     broadcasted;        //was the packet already broadcasted (multicast case)
+}packet_info;
+
+//for cbrseq stats
+typedef struct{
+    uint16_t    src;   
+    uint64_t    cbrseq;   
+} cbrseq_info;
+
+//-----------------------------------------
+//		SCANNING / NEIGH
+//-----------------------------------------
+
+//info about a received beacon
+typedef struct{
+	uint8_t		seq_num;
+	uint64_t	time;
+	//RSSI? others?
+}beacon_info;
+
+
+
+//when a seqnum multicast is advertised in beacons
+typedef struct{
+    uint8_t     caddr;          //compact notation (with offset ADDR_MULTI_MIN removed)
+    uint8_t     seqnum_min;
+    uint8_t     seqnum_max;
+}seqnum_beacon_info;
+
+
+//when a seqnum multicast was received correctly
+typedef struct{
+    uint8_t     seqnum;
+    uint64_t    time;
+}seqnum_rx_info;
+
+
+
+//to monitor the neighborhood (sf assignment)
+typedef struct{
+	uint64_t	last_scan;
+	int			nb_pk_rx;			//a metric to reflect the load
+}sfslot_info;
+
+
+//one neighbor
+typedef struct {
+    uint16_t    addr_short;
+	double		depth;
+	uint8_t		sf_slot;
+	uint8_t		bop_slot;
+	short		is_child;		//this node is a child
+	uint64_t	last_rx;		//the last time we received one packet from this node
+	beacon_info	*beacons;		//the list of beacons I received for the last X time
+	short		has_a_child;	//this is a "real" coordinator
+	short		hops;
+    
+    //for broadcast/multicast
+    short             multicast_to_rx;
+    seqnum_rx_info      *seqnum_rx[ADDR_MULTI_NB];         //all the seqnum I received from this node (array of das)
+    seqnum_beacon_info  seqnum_beacons[ADDR_MULTI_NB];     //the max/min seqnum this node advertises (array)
+} neigh_info;
+
+
+
+
+//-----------------------------------------
+//		QUEUES TO STORE PACKETS
+//-----------------------------------------
+
+
+//the queue increases by step of 10 packets
+#define PK_INCR 10
+
+typedef struct{
+	packet_info	**elts;
+	int			size;
+	int			size_reserved;
+}queue_info;
+
+
+
+
+
+
+//-----------------------------------------
+//		NODE's PROPERTIES
+//-----------------------------------------
+
+
+
+
+typedef struct {
+	call_t		*c;						//the wsnet pointer for this node
+	uint64_t    start;
+	
+	//type of node
+	int			node_type;
+	uint64_t	addr_long;
+	uint16_t	addr_short;
+	
+	//my id (wsnet id)
+	int         my_id;
+	
+	//parents (a DAS)
+	parent_info	*parents;
+	uint16_t	parent_addr_current;		//the short address of the current parent (the current superframe I am participating/asociating to)
+	
+	//information about the MAC process
+	mac_info	mac;
+	
+	//superframe
+	sframe_info	sframe;
+	
+	//finite state machine
+	fsm_info	fsm;
+	
+	//queues
+	queue_info	*buffer_data_up;		//buffer for data frames to my parent
+	queue_info	*buffer_data_down;		//buffer for data frames to my children (packet + control info)
+	queue_info	*buffer_mgmt;			//for management frames (assoc-rep)
+    queue_info  *buffer_multicast[ADDR_MULTI_NB];       //buffer for multicast packets
+	packet_info	*pk_tx_up_pending;		//the next packet to transmit toward the parent
+	packet_info	*pk_tx_down_pending;	//the next packet to transmit (after a data_req) -> packet + metadata
+	
+	//sequence numbers for any packet
+	uint8_t		last_seq_num_to_ack;	//the last transmitted sequence nb to ack 
+	uint8_t		last_tx_seq_num;		//the current seq num (it is incremented automatically)
+
+	//radio
+    int         channel;
+    energy_t    *radio_energy;          //pointing to the energy info updated by the radio module
+        
+	//neighborhood table
+	neigh_info	*neigh_table;    
+    
+    //seqnums
+    uint8_t         seqnum_tx_unicast;      //the next seqnum I must use for each unicast
+    uint8_t         seqnum_tx_multicast[ADDR_MULTI_NB];   //the next seqnum I must use for each multicast address 
+    cbrseq_info     *cbrseq_rx;              //cbrseq for flooded packets
+    
+	//activity for each sf slot
+	sfslot_info	*sfslot_table;			//activity monitored for each sf slot
+} nodedata_info;
+
+
+
+
+//-----------------------------------------
+//			CBR STATS
+//-----------------------------------------
+
+
+
+//a packet is forwarded
+typedef struct{
+    uint16_t    nodeid;
+    uint64_t    time;
+}forward_info;
+
+//statistics about the CBR
+typedef struct{
+	uint64_t	time_generated;
+	uint64_t	time_received;
+	int			src;
+	int			dest;	
+	int			sequence;
+	uint16_t	*route;
+    uint16_t    *neigh_radio;
+    uint16_t    *neigh_ctree;
+    uint16_t    *neigh_rcvd;
+	short		drop_reason;
+}stat_cbr_info;
+
+
+
+//-----------------------------------------
+//			CLUSTER TREE STATS
+//-----------------------------------------
+
+typedef struct{
+	uint64_t	association_time;
+} stat_ctree_info;
+
+
+#endif
+
+

@@ -1,0 +1,482 @@
+/*
+ *  data.c
+ *  
+ *
+ *  Created by Fabrice Theoleyre on 11/02/11.
+ *  Copyright 2011 CNRS. All rights reserved.
+ *
+ */
+
+#include "data.h"
+
+
+
+
+
+
+
+//-------------------------------------------------
+//		ENQUEUE  a packet to forward UNICAST
+//-------------------------------------------------
+
+//upload direction
+int data_route_up(call_t *c, packet_t *packet){
+	nodedata_info *nodedata = get_node_private_data(c);
+
+	//packet header
+  	_802_15_4_DATA_header	*header_data	= (_802_15_4_DATA_header *) (packet->data + sizeof(_802_15_4_header));
+	cbrv3_packet_header		*header_cbr		= (cbrv3_packet_header *) (packet->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+
+	
+	//I am not yet associated -> let drop the packet
+	if (nodedata->addr_short == ADDR_INVALID_16){
+
+		tools_debug_print(c, "\n\n[MAC_RX_DATA] DATA message received from %d to %d via %d cbrseq=%d -> dropped: I am not yet associated\n\n\n", header_data->src_end2end, header_data->dst_end2end, header_data->src, header_cbr->sequence);
+		stats_data_update_drop_reason(c, packet, DROP_NOT_ASSOCIATED);
+		
+		//memory
+		packet_dealloc(packet);		
+		return(1);
+	}			
+	
+	//ANY parent: I will decide later (e.g. when the superframe of one of my parents begins)	
+	header_data->dst = ADDR_ANY_PARENT_16;
+	buffer_insert_pk(c, nodedata->buffer_data_up, buffer_pk_info_create(c, packet), TIMEOUT_DEFAULT);
+	
+	//debug
+	buffer_content_print(c, nodedata->buffer_data_up, "DATA-UP");
+
+	return(0);
+}
+
+//download direction
+int data_route_down(call_t *c, packet_t *packet){
+	nodedata_info *nodedata = get_node_private_data(c);
+
+	//packet header
+  	_802_15_4_DATA_header	*header_data	= (_802_15_4_DATA_header *) (packet->data + sizeof(_802_15_4_header));
+	cbrv3_packet_header		*header_cbr		= (cbrv3_packet_header *) (packet->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+
+	
+	header_data->dst = routing_ideal_get_next_hop(c, header_data->dst_end2end);
+	
+	//if no next hop exists, let drop the packet
+	if (header_data->dst == ADDR_INVALID_16){
+
+		tools_debug_print(c, "\n\n[MAC_RX_DATA] DATA message received from %d to %d via %d cbrseq=%d -> dropped: no next hop\n\n\n", header_data->src_end2end, header_data->dst_end2end, header_data->src, header_cbr->sequence);
+		
+		//memory
+		packet_dealloc(packet);		
+		return(1);
+	}			
+	buffer_insert_pk(c, nodedata->buffer_data_down, buffer_pk_info_create(c, packet), TIMEOUT_DEFAULT);
+	
+	//debug
+	buffer_content_print(c, nodedata->buffer_data_down, "DATA-DOWN");								 
+	return(0);
+}
+
+
+
+//I am the final destination
+int data_route_final_dest(call_t *c, packet_t *packet_rcvd){
+	nodedata_info *nodedata = get_node_private_data(c);
+    
+	//packet header
+  	_802_15_4_DATA_header	*header_data	= (_802_15_4_DATA_header *) (packet_rcvd->data + sizeof(_802_15_4_header));
+	cbrv3_packet_header		*header_cbr		= (cbrv3_packet_header *) (packet_rcvd->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+    
+	
+	tools_debug_print(c, "[MAC_RX_DATA] DATA message finally received from ID = %d via %d, cbrseq=%d\n", header_data->src_end2end, header_data->src, header_cbr->sequence);
+	
+	//To update CBR stats
+	stat_cbr_info	*stat_elem;
+	das_init_traverse(global_cbr_stats);
+	while ((stat_elem = (stat_cbr_info*) das_traverse(global_cbr_stats)) != NULL) {
+		if ((stat_elem->sequence == header_cbr->sequence) && (stat_elem->src == header_cbr->source)){
+			//		printf("found sequence %d, node %d\n", header_cbr->sequence, header_cbr->source);
+			stat_elem->time_received = get_time();
+		}
+	}
+	
+	
+	//DATA successfully received - push it on upper layer
+	array_t *up = get_entity_bindings_up(c);
+	
+	/* Drop packet if no upper layer available */
+	if (up == NULL) 
+		tools_exit(4, c, "ERROR: no upper layer is available!!\n");
+    
+	
+	//forward one copy of the packet to each upper layer we are connected with
+	int layer_id = up->size;					
+	while (layer_id--) {
+		call_t c_up = {up->elts[layer_id], nodedata->addr_short, c->entity};
+		packet_t *packet_up;	     
+		
+		//only the last one has not to be copied
+		if (layer_id > 0)
+			packet_up = packet_clone(packet_rcvd);         
+		else
+			packet_up = packet_rcvd;
+		
+		RX(&c_up, packet_up);
+	}
+	return(0);
+}
+
+
+
+
+
+
+
+//--------------------------------------------
+//              MULTICAST CASE
+//--------------------------------------------
+
+
+//how should I deal with a multicast packet (it depends on the implemented algo)
+void data_route_multicast(call_t *c, packet_t *packet_rcvd){
+  	nodedata_info *nodedata = get_node_private_data(c);
+    
+	//packet header
+    _802_15_4_DATA_header	*header_data	= (_802_15_4_DATA_header *) (packet_rcvd->data + sizeof(_802_15_4_header));
+    _802_15_4_DATA_header   *header_new;
+    
+    //packets
+    packet_t    *packet_new;
+    
+    //control
+    int     i;
+    
+    
+	//I am not yet associated -> let drop the packet
+	if (nodedata->addr_short == ADDR_INVALID_16){
+        
+		tools_debug_print(c, "\n\n[MAC_RX_DATA] Multicast packet from %d to %d dropped: I am not yet associated\n\n\n", 
+                          header_data->src_end2end, 
+                          header_data->dst_end2end);
+		
+		//memory
+		packet_dealloc(packet_rcvd);		
+		return;
+	}	
+    
+    
+    //For flooded packets
+    if ((header_data->dst_end2end == ADDR_MULTI_FLOOD_CTREE) || (header_data->dst_end2end == ADDR_MULTI_FLOOD_DISC)){
+        
+        cbrv3_packet_header		*header_cbr		= (cbrv3_packet_header *) (packet_rcvd->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+        
+        
+        //I already received this packet -- flooding case 
+        if (mgmt_cbrseq_rx(c, header_data->src_end2end, header_cbr->sequence)){    		
+            tools_debug_print(c, "[DATA] packet was aleadry received, let drop it\n");
+            packet_dealloc(packet_rcvd);		
+            return;
+        
+        }
+        
+        //insert this reception in the list of known cbrseq
+        else
+            mgmt_cbrseq_add(c, header_data->src_end2end, header_cbr->sequence);        
+    }
+     
+    
+    //I am the forwarder
+    header_data->src = nodedata->addr_short;
+    
+    
+    switch(param_get_multicast_algo()){
+        case ALGO_MULTICAST_DUPLICATE:
+        case ALGO_MULTICAST_DUPLICATE_ACK:
+            
+            //one copy for each parent (upload buffer)            
+            for(i=0; i<ctree_parent_get_nb_associated(nodedata->parents); i++){
+                //duplication
+                packet_new = packet_clone(packet_rcvd);
+                header_new	= (_802_15_4_DATA_header *) (packet_new->data + sizeof(_802_15_4_header));
+
+                //fill the new destination field and push the packet in the buffer
+                header_new->dst = ctree_parent_get_associated(nodedata->parents, i);
+                buffer_insert_pk(c, nodedata->buffer_data_up, buffer_pk_info_create(c, packet_new), TIMEOUT_DEFAULT);
+                
+                //does this unicast packet has to be acked?
+                if (param_get_multicast_algo() == ALGO_MULTICAST_DUPLICATE_ACK)
+                    pk_set_A(packet_new, TRUE);
+                
+                tools_debug_print(c, "[MUTLICAST] copy for parent %d\n", header_new->dst);
+            }
+            
+            //one copy for each child (download buffer)
+            for(i=0; i<neigh_table_get_nb_children(nodedata->neigh_table); i++){
+                //duplication
+                packet_new = packet_clone(packet_rcvd);
+                header_new	= (_802_15_4_DATA_header *) (packet_new->data + sizeof(_802_15_4_header));
+
+                //fill the new destination field and push the packet in the buffer
+                header_new->dst = neigh_table_get_child(nodedata->neigh_table, i);
+                buffer_insert_pk(c, nodedata->buffer_data_down, buffer_pk_info_create(c, packet_new), TIMEOUT_DEFAULT);
+               
+                
+                //does this unicast packet has to be acked?
+                if (param_get_multicast_algo() == ALGO_MULTICAST_DUPLICATE_ACK)
+                   pk_set_A(packet_new, TRUE);                
+
+                tools_debug_print(c, "[MULTICAST] copy for child %d\n", header_new->dst);
+            }    
+            
+            //dealloc the original copy
+            packet_dealloc(packet_rcvd);
+            
+            break;
+            
+        case ALGO_MULTICAST_SEQ:
+
+            ;
+            header_new	= (_802_15_4_DATA_header *) (packet_rcvd->data + sizeof(_802_15_4_header));
+
+            //some information about the packet
+            pk_set_seqnum(packet_rcvd, mgmt_assign_seqnum(c, header_new->dst-ADDR_MULTI_MIN));
+            header_new->dst = header_data->dst_end2end;
+ 
+            //insert the packet in the global multicast buffer and assigns a new seqnum for it
+            buffer_insert_pk(c, nodedata->buffer_multicast[header_new->dst-ADDR_MULTI_MIN], buffer_pk_info_create(c, packet_rcvd), TIMEOUT_DEFAULT);
+            
+            tools_debug_print(c, "[MULTICAST] multicast packet to %d inserted in the buffer %d (seqnum=%d)\n",
+                              header_data->dst_end2end,
+                              header_new->dst-ADDR_MULTI_MIN,
+                              pk_get_seqnum(packet_rcvd));
+                              
+                              
+            
+            break;
+            
+        default:
+            tools_exit(5, c , "[BORDACAST] this multicast algo (%d) is unknwown\n", param_get_multicast_algo());
+            break;
+    }
+}
+
+
+
+
+
+
+//--------------------------------------------
+//		ROUTING a received packet
+//--------------------------------------------
+
+
+
+//forwards either to the higher layer or put it in the correct queue
+void data_route(call_t *c, packet_t *packet_rcvd){
+	nodedata_info *nodedata = get_node_private_data(c);
+	int				routing_error;
+	
+	//packet header
+  	_802_15_4_DATA_header	*header_data	= (_802_15_4_DATA_header *) (packet_rcvd->data + sizeof(_802_15_4_header));
+	
+	//This is a data frame with a zero payload length -> just drop it
+	//NB: it may be used after a data-req to notify the coordinator has no packet for me!
+	if (pk_data_has_zero_payload(packet_rcvd)){
+		packet_dealloc(packet_rcvd);
+		
+		return;
+	}
+		
+	//I am the final destination!!
+	if (header_data->dst_end2end == nodedata->addr_short){
+		tools_debug_print(c, "[MAC_RX_DATA] packet received\n");
+        
+        //routes stats for non zero data frames
+        stats_list_add(c, packet_rcvd, LIST_ROUTE, c->node, TRUE);
+
+<<<<<<< .mine
+if (header_data->dst == nodedata->addr_short)
+ remonte couche sup
+=======
+        data_route_final_dest(c, packet_rcvd);
+        return;
+    }
+>>>>>>> .r581
+	
+    
+	//MULTICAST
+    else if (tools_is_addr_multicast(header_data->dst_end2end)){
+        tools_debug_print(c, "[MAC_RX_DATA] Multicast received from %d to %d (via %d, next hop %d)\n", 
+                          header_data->src_end2end, 
+                          header_data->dst_end2end, 
+                          header_data->src, 
+                          header_data->dst);
+        
+        
+        //Stats for CBR
+        call_t c_appli = {get_entity_bindings_up(c)->elts[0], c->node, c->entity};
+        struct _cbr_private *appli_data = get_node_private_data(&c_appli);        
+        
+        if (header_data->dst_end2end == appli_data->multicast_dest){
+            
+            if (header_data->src == nodedata->addr_short)
+                stats_multicast_add_pk(c, packet_rcvd);
+            else{
+                stats_list_add(c, packet_rcvd, LIST_NEIGH_RCVD, c->node, TRUE);  
+            }
+        }
+        
+        //forward the multicast packet (special case: I am the source if non flooding)
+        if (header_data->src == nodedata->addr_short)
+            data_route_multicast(c, packet_rcvd);
+        
+        //flooding packet
+        else if ((header_data->dst_end2end == ADDR_MULTI_FLOOD_DISC) || (header_data->dst_end2end == ADDR_MULTI_FLOOD_CTREE))
+            data_route_multicast(c, packet_rcvd);
+        
+        //we have received a packet generated by a neighbor
+        else
+            packet_dealloc(packet_rcvd);
+        
+    }
+    
+	//UNICAST: find the correct queue (UP or DOWN)
+	else{
+        tools_debug_print(c, "[MAC_RX_DATA] Unicast received from %d to %d (via %d, next hop %d)\n", 
+                          header_data->src_end2end, 
+                          header_data->dst_end2end, 
+                          header_data->src, 
+                          header_data->dst); 
+        
+        //routes stats for non zero data frames
+        stats_list_add(c, packet_rcvd, LIST_ROUTE, c->node, TRUE);
+
+        //I am now the forwarder
+		header_data->src = nodedata->addr_short;
+		
+		//upload direction -> we forward the packet to our parent
+		if (header_data->dst_end2end == ID_PAN_COORD)
+			routing_error = data_route_up(c, packet_rcvd);
+		
+		//in download direction, we search for the next hop
+		else	
+			routing_error = data_route_down(c, packet_rcvd);
+			
+		if (!routing_error){
+			cbrv3_packet_header *header_cbr	= (cbrv3_packet_header *) (packet_rcvd->data + sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header));
+			tools_debug_print(c, "[MAC_RX_DATA] Unicast DATA message received from %d to %d (via %d, next hop %d) cbrseq=%d\n", header_data->src_end2end, header_data->dst_end2end, header_data->src, header_data->dst, header_cbr->sequence);
+		}
+        else
+            tools_debug_print(c, "[MAC_RX_DATA] route error\n");
+	}
+}	
+
+
+
+
+//------------------------------------
+//		RECEPTION
+//------------------------------------
+
+
+// I receive one data packet -> I must send an ACK
+void data_rx(call_t *c, packet_t *packet_rcvd) {
+	call_t				c_radio = {get_entity_bindings_down(c)->elts[0], c->node, c->entity};
+	nodedata_info *nodedata = get_node_private_data(c);
+	char	msg[50];
+	int		pk_size;
+	
+	//packet header
+    _802_15_4_DATA_header *header_data = (_802_15_4_DATA_header *) (packet_rcvd->data + sizeof(_802_15_4_header));
+	
+	
+	//Ack transmission + state transition when the tx will be finished
+	if ((pk_get_A(packet_rcvd)) && (nodedata->mac.tx_end <= get_time())){
+		
+		//I create and transmit the ack
+		pk_size = mgmt_ack_tx(c, pk_get_seqnum(packet_rcvd), buffer_search_for_addr_short(c, header_data->src, NULL));
+	}
+	else if ((pk_get_A(packet_rcvd)) && (nodedata->mac.tx_end > get_time())){        
+        tools_debug_print(c, "[RX] I am busy until %s. I cannot ack this data frame\n", 
+                          tools_time_to_str(nodedata->mac.tx_end, msg, 100));
+        pk_size = 0;    
+    }
+    else
+		pk_size = 0;
+	
+		
+	//a packet was already scheduled -> we have to reschedule our backoff
+	if (nodedata->pk_tx_up_pending != NULL){
+		
+		//the data packet comes probably from our pending data-req -> let remove it from our buffer!
+		if (pk_get_ftype(nodedata->pk_tx_up_pending->packet) == MAC_COMMAND_PACKET){
+
+			//command headers to find the sub-type
+			_802_15_4_COMMAND_header	*header_cmd = (_802_15_4_COMMAND_header*) (nodedata->pk_tx_up_pending->packet->data + sizeof(_802_15_4_header));
+			
+			if (header_cmd->type_command == DATA_REQUEST){
+				tools_debug_print(c, "[DATA-RX] remove the current data-req for %d (cbrseq=%d)\n", header_cmd->dst, pk_get_cbrseq(nodedata->pk_tx_up_pending->packet));
+
+                //MAC reinitizalition for next packets
+                nodedata->mac.NB = 0;
+                
+                //come back to the idle state
+                fsm_change(c, STATE_CHILD_IDLE, get_time() + aTurnaroundTime + pk_size * 8 * radio_get_Tb(&c_radio) + mactACK);
+                
+				//memory
+				packet_dealloc(nodedata->pk_tx_up_pending->packet);
+				free(nodedata->pk_tx_up_pending);
+				buffer_change_pk_tx_up_pending(c, NULL);	
+			}
+		}
+	}
+	
+	//route the packet (queues, next hop, upper layer, etc)
+    data_route(c, packet_rcvd);		
+}
+
+
+
+
+//----------------------------------------------
+//				NULL DATA PACKETS
+//----------------------------------------------
+
+
+
+//create a data packet with a zero payload (reply to a data-req when we have no data to transmit)
+packet_info *data_create_pk_with_zero_payload(call_t *c, uint16_t dest){
+	nodedata_info *nodedata = get_node_private_data(c);
+ 	
+	packet_t					*data_pk		= packet_create(c, sizeof(_802_15_4_header) + sizeof(_802_15_4_DATA_header), -1);
+	_802_15_4_DATA_header		*header_data	= (_802_15_4_DATA_header*) (data_pk->data + sizeof(_802_15_4_header));
+	
+	
+	tools_debug_print(c, "[DATA-REP] send a null data since we do not have frame for %d, pk id %d\n", dest, data_pk->id);
+	
+	//common headers
+	pk_set_ftype(data_pk, MAC_DATA_PACKET);
+	
+	//null data have not to be acknowledged!
+	pk_set_A(data_pk, FALSE);
+	pk_set_P(data_pk, FALSE);
+	
+	//data headers
+	header_data->src			= nodedata->addr_short;
+	header_data->dst			= dest;
+	header_data->src_end2end	= nodedata->addr_short;
+	header_data->dst_end2end	= dest;
+	
+	//the packaged result
+	packet_info		*pk_buffer_elem = (packet_info*) malloc(sizeof(packet_info));
+	pk_buffer_elem->packet			= data_pk;
+	pk_buffer_elem->nb_retry		= 0;		//not used for such packet
+	pk_buffer_elem->buffered		= FALSE;
+	pk_buffer_elem->time_insertion	= get_time();
+	pk_buffer_elem->priority		= PRIO_DATA;
+	
+	return(pk_buffer_elem);
+}
+
+
+
+

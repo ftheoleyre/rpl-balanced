@@ -1,0 +1,10 @@
+
+for file in $LOCATION_JOBS/*
+do
+	#jobs -p | wc -l
+
+	echo "starting .... $file"
+	chmod u+x $file
+	$file 
+done
+
